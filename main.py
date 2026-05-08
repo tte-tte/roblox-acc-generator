@@ -183,6 +183,7 @@ def run_one(
     retry_on_failure: bool = False,
     solve_pow: bool = False,
     browser_cfg: str = "auto",
+    check_username: bool = False,
 ) -> Attempt:
     a = Attempt(worker=worker, proxy=proxy)
     a.username = gen_username()
@@ -210,6 +211,16 @@ def run_one(
         MAX_NAME_RETRIES = 5
         retry_resp = None
         suppress_fail_log = False
+
+        if check_username:
+            for _ in range(MAX_NAME_RETRIES):
+                ok, _vmsg = auth.validate_username(a.username, birthday)
+                if ok:
+                    break
+                a.username = gen_username()
+                auth.challenge = None
+            else:
+                raise RuntimeError(f"{MAX_NAME_RETRIES} username pre-validations exhausted (last: {a.username})")
 
         for _ in range(MAX_NAME_RETRIES):
             try:
@@ -404,6 +415,7 @@ def main():
     birthday_cfg  = _g(cfg, "run", "birthday",   default="auto")
     gender_cfg    = _g(cfg, "run", "gender",     default="auto")
     browser_cfg   = str(_g(cfg, "run", "browser", default="auto"))
+    check_user    = bool(_g(cfg, "run", "check_username",                                                  default=False))
     retry_on_fail = bool(_g(cfg, "run", "retry_on_failure",                                                default=False))
 
     if args.compact:
@@ -483,6 +495,7 @@ def main():
             ("browser",      browser_label),
             ("birthday",     bday_label),
             ("gender",       gender_label),
+            ("check_user",   "ON" if check_user    else "off"),
             ("retry_fail",   "ON" if retry_on_fail else "off"),
             ("solve_pow",    "ON" if solve_pow     else "off"),
             ("output",       accounts_path),
@@ -530,7 +543,7 @@ def main():
             fut = ex.submit(
                 run_one, i % threads, client, proxy_for(),
                 birthday_cfg, gender_cfg, debug, ui,
-                retry_on_fail, solve_pow, browser_cfg,
+                retry_on_fail, solve_pow, browser_cfg, check_user,
             )
             in_flight.add(fut)
 

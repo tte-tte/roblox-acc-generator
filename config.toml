@@ -32,6 +32,12 @@ gender = "auto"
 #   "chrome" → Chrome 146 on Windows
 browser = "chrome"
 
+# Pre-flight check the username via /v1/usernames/validate before signup.
+# Avoids burning a /v2/signup attempt (and any captcha solve) on a name
+# Roblox would reject anyway. Costs one extra cheap POST per attempt;
+# pays for itself whenever the generator picks a taken or banned name.
+check_username = false
+
 # If a username is flagged AFTER a successful captcha (post-solve rename),
 # retry with a fresh username on the same session instead of giving up.
 # Costs an extra solve but recovers the attempt.

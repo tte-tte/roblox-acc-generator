@@ -52,24 +52,24 @@
 
 ---
 
-## Contents
+## 📚 Contents
 
-- [What it does](#what-it-does)
-- [Layout](#layout)
-- [Requirements](#requirements)
-- [Install](#install)
-- [Configuration](#configuration)
-- [CLI flags](#cli-flags)
-- [Running](#running)
-- [Signup flow](#signup-flow)
-- [Output](#output)
-- [Outcome tags](#outcome-tags)
-- [Notes](#notes)
-- [Changelog](#changelog)
+- [🎯 What it does](#-what-it-does)
+- [🗂️ Layout](#-layout)
+- [📋 Requirements](#-requirements)
+- [📦 Install](#-install)
+- [⚙️ Configuration](#-configuration)
+- [🚩 CLI flags](#-cli-flags)
+- [🚀 Running](#-running)
+- [🔄 Signup flow](#-signup-flow)
+- [📤 Output](#-output)
+- [🏷️ Outcome tags](#-outcome-tags)
+- [📝 Notes](#-notes)
+- [📜 Changelog](#-changelog)
 
 ---
 
-## What it does
+## 🎯 What it does
 
 Creates Roblox accounts in bulk by driving the real `auth.roblox.com/v2/signup` endpoint and resolving the Arkose challenge through the Solvex API.
 
@@ -86,7 +86,7 @@ Captcha tokens are only accepted if Solvex returns them as **suppressed** (or Po
 
 ---
 
-## Layout
+## 🗂️ Layout
 
 ```
 Roblox-Account-Creator-Solvex/
@@ -107,7 +107,7 @@ Roblox-Account-Creator-Solvex/
 
 ---
 
-## Requirements
+## 📋 Requirements
 
 - Python 3.11+ (uses `tomllib` from stdlib)
 - A Solvex API key — get one at [solvex.run](https://solvex.run)
@@ -115,7 +115,7 @@ Roblox-Account-Creator-Solvex/
 
 ---
 
-## Install
+## 📦 Install
 
 ```bash
 pip install -r requirements.txt
@@ -128,7 +128,7 @@ Dependencies:
 
 ---
 
-## Configuration
+## ⚙️ Configuration
 
 All defaults live in `config.toml`. Any value can be overridden by a CLI flag.
 
@@ -141,6 +141,7 @@ compact = false           # single-line live status bar
 birthday = "auto"         # "auto" = random 16–40yo, or ISO string e.g. "1995-06-15T00:00:00.000Z"
 gender = "auto"           # "auto" = random F/M/N, or 1=F, 2=M, 3=N/A
 browser = "auto"          # "auto" = random Safari/Chrome per worker, or pin "safari" / "chrome"
+check_username = false    # pre-flight via /v1/usernames/validate; skips /v2/signup on names Roblox would reject
 retry_on_failure = false  # re-solve captcha if username flagged AFTER token consumed (RENAME)
 
 [solvex]
@@ -162,7 +163,7 @@ accounts_file = "accounts.txt"
 cookies_file = "cookies.txt"
 ```
 
-### Proxy file format
+### 🔌 Proxy file format
 
 `input/proxies.txt` — one proxy per line. All of these work:
 
@@ -175,7 +176,7 @@ socks5://user:pass@host:port
 
 `host:port` on port `1080` is auto-detected as `socks5`; everything else defaults to `http`.
 
-### Environment variables
+### 🌱 Environment variables
 
 | Variable          | Effect                                                                  |
 | ----------------- | ----------------------------------------------------------------------- |
@@ -184,7 +185,7 @@ socks5://user:pass@host:port
 
 ---
 
-## CLI flags
+## 🚩 CLI flags
 
 ```
 --config FILE               path to TOML config (default: config.toml)
@@ -205,7 +206,7 @@ Paths in flags and config are resolved relative to `main.py`, not the shell's CW
 
 ---
 
-## Running
+## 🚀 Running
 
 ```bash
 # Use config.toml as-is
@@ -222,7 +223,7 @@ python main.py --no-proxy            # direct (will get 429'd fast)
 
 ---
 
-## Signup flow
+## 🔄 Signup flow
 
 The full path inside `run_one()` (in `main.py`):
 
@@ -234,7 +235,7 @@ The full path inside `run_one()` (in `main.py`):
 6. **Submit + retry** — `POST /challenge/v1/continue` with the token, then re-POST `/v2/signup` with `rblx-challenge-id`, `rblx-challenge-type`, `rblx-challenge-metadata` headers. `200` = account created, cookies in the jar.
 7. **Post-captcha rename** — if `/v2/signup` *now* returns `UsernameInvalid` / `UsernameTaken`, the captcha token is already consumed. With `retry_on_failure = true` a fresh username is tried (costs another captcha); otherwise the attempt is logged as `RENAME` and abandoned.
 
-### Why Solvex tokens are validated as "suppressed"
+### 🤔 Why Solvex tokens are validated as "suppressed"
 
 Solvex returns one of three challenge types in `solution.challengeType`:
 
@@ -242,13 +243,13 @@ Solvex returns one of three challenge types in `solution.challengeType`:
 - `pow` — Arkose required a Proof-of-Work. Solvex can solve it if `solve_pow = true`; the resulting token is treated as suppressed when `verified = true`.
 - (anything else) — visual puzzle was solved. These tokens **do not** work for signup. The attempt is rejected locally with `CHALLENGED` to avoid wasting another `/v2/signup`.
 
-### What gets sent to Solvex
+### 📡 What gets sent to Solvex
 
 `SolvexClient.arkose()` forwards the worker's UA via the `userAgent` field so the wire claim matches the Roblox session that produced the cookies. It deliberately does **not** set the `Browser` field — with `Browser` empty the upstream solver-service falls through to its chrome default (~97 unique devices vs ~4 on safari1, which burns almost instantly under per-pk pinning). UA is a wire claim, `Browser` is a routing hint — they are not the same lever.
 
 ---
 
-## Output
+## 📤 Output
 
 `output/accounts.txt` — append-only, one line per created account:
 
@@ -275,7 +276,7 @@ output       <path>
 
 ---
 
-## Outcome tags
+## 🏷️ Outcome tags
 
 Each attempt logs one of:
 
@@ -294,7 +295,7 @@ Each attempt logs one of:
 
 ---
 
-## Notes
+## 📝 Notes
 
 - **Roblox impersonation.** `main.py` picks one of two `curl_cffi` profiles per worker: `safari180` (Safari 18 on macOS, no `sec-ch-ua`, `Accept-Encoding: gzip, deflate, br`) or `chrome146` (Chrome 146 on Windows, full `sec-ch-ua` trio, `Accept-Encoding: gzip, deflate, br, zstd`). The TLS fingerprint, UA, and `sec-ch-ua` headers are kept consistent — Roblox flags Chrome-TLS-with-Safari-UA (or vice versa) as bot-like and bumps the Arkose risk score, which costs you suppression rate. Don't half-mix profiles.
 - **`shared_parameters`.** Captured from the captcha challenge metadata. The current code does not include it in the `/challenge/v1/continue` body, but it is parsed and stored on `RobloxChallenge` for future use. Do not strip it from `_parse_captcha_challenge`.
@@ -304,7 +305,7 @@ Each attempt logs one of:
 
 ---
 
-## Changelog
+## 📜 Changelog
 
 ```diff
 v0.3.0
@@ -333,7 +334,7 @@ v0.1.0
 
 ---
 
-## License
+## ⚖️ License
 
 MIT.
 

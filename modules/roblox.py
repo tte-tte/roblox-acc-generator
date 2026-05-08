@@ -143,6 +143,32 @@ class RobloxAuth:
         for t in threads:
             t.join(timeout=15)
 
+    def validate_username(self, username: str, birthday_iso: str) -> tuple[bool, str]:
+        """Pre-flight check via /v1/usernames/validate.
+
+        Returns (available, message). Lets the caller skip /v2/signup (and any
+        captcha solve) on names Roblox will reject anyway.
+
+        Roblox response code: 0 = valid, 1 = taken, 2 = invalid/banned, etc.
+        Also harvests x-csrf-token so the subsequent signup() call doesn't
+        need to validate again.
+        """
+        s = self.client._session
+        resp = s.post(
+            f"{AUTH_URL}/v1/usernames/validate?urlLocale=en_us",
+            data=json.dumps({"username": username, "birthday": birthday_iso, "context": "Signup"}),
+            headers=self._auth_headers(),
+            timeout=SIGNUP_TIMEOUT_S,
+        )
+        new_csrf = resp.headers.get("x-csrf-token")
+        if new_csrf:
+            self.csrf_token = new_csrf
+        try:
+            data = resp.json()
+        except Exception:
+            return False, f"http {resp.status_code}"
+        return data.get("code") == 0, str(data.get("message") or "")
+
     def signup(self, username: str, password: str, birthday_iso: str, gender: int = 2) -> RobloxChallenge | None:
         s = self.client._session
 

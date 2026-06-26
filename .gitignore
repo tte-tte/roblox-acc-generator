@@ -10,6 +10,11 @@ env/
 
 # Sensitive / generated
 *.log
+config.toml
+input/proxies.txt
+output/
+.env
+*.env
 
 # Editor
 .vscode/

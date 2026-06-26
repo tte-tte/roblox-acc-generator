@@ -9,6 +9,7 @@ Compact mode:
 """
 from __future__ import annotations
 
+import os
 import re
 import sys
 import threading
@@ -29,7 +30,17 @@ class C:
     BLUE    = "\x1b[38;5;111m"
 
 
-_ISATTY = sys.stdout.isatty()
+def _color_enabled() -> bool:
+    no_color = (os.environ.get("NO_COLOR") or "").strip().lower()
+    if no_color and no_color not in ("0", "false", "no"):
+        return False
+    force = (os.environ.get("FORCE_COLOR") or os.environ.get("CLICOLOR_FORCE") or "").strip().lower()
+    if force and force not in ("0", "false", "no"):
+        return True
+    return sys.stdout.isatty()
+
+
+_ISATTY = _color_enabled()
 _ANSI   = re.compile(r"\x1b\[[0-9;]*m")
 SPINNER = "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"
 

@@ -19,7 +19,10 @@ from dataclasses import dataclass
 from modules.http import HttpClient
 from modules.logger import UI, C, c
 from modules.roblox import RobloxAuth, RobloxError
-from modules.solvex_client import SolvexClient, SolverError
+from modules.twocaptcha_client import TwoCaptchaClient
+from modules.anticaptcha_client import AntiCaptchaClient
+from modules.twocaptcha_client import SolverError  # shared exception class shape
+from modules import group_join
 
 _ARKOSE_PK = "A2A14B1D-1AF3-C791-9BBC-EE33CC7A0A6F"
 _ARKOSE_SURL = "https://arkoselabs.roblox.com"
@@ -94,7 +97,7 @@ def gen_password() -> str:
 def gen_birthday() -> str:
     from datetime import datetime, timezone
     today = datetime.now(timezone.utc)
-    age = random.randint(16, 40)
+    age = random.randint(19, 40)
     year = today.year - age
     month = random.randint(1, 12)
     day = random.randint(1, 28)
@@ -170,11 +173,60 @@ class Attempt:
     error: str | None = None
     duration_ms: int = 0
     captcha_ms: int = 0
+    # Group-join outcome captured immediately after a successful signup so
+    # _write_result can mirror it into joined.txt without re-querying Roblox.
+    joined:        bool = False
+    join_status:   str = ""
+
+
+def _maybe_join_group(
+    a: Attempt,
+    session,
+    profile: dict,
+    *,
+    group_id: int | str | None,
+    auto_join: bool,
+    ui: UI,
+    worker: int,
+    arkose_solver=None,
+    proxy: str | None = None,
+) -> None:
+    """Best-effort group join immediately after a successful signup. The
+    session still holds the warm cookie jar from /v2/signup — perfect time
+    to join (no re-login, no 24h trust hold for public community groups).
+    Failures are non-fatal: account is already created and persisted; we
+    just log and record the reason so the standalone join_group.py can
+    retry later if desired."""
+    if not (auto_join and group_id):
+        return
+    try:
+        result = group_join.join_group(
+            session,
+            group_id,
+            user_agent=profile["user_agent"],
+            accept_language=profile["accept_language"],
+            sec_ch_ua=profile["sec_ch_ua"],
+            sec_ch_ua_platform=profile["sec_ch_ua_platform"],
+            sec_ch_ua_mobile=profile["sec_ch_ua_mobile"],
+            arkose_solver=arkose_solver,
+            proxy=proxy,
+        )
+    except Exception as e:
+        a.joined = False
+        a.join_status = f"exception: {type(e).__name__}: {e}"
+        ui.event(worker, "JOIN-FAIL", f"{a.username} — {a.join_status}", C.YELLOW)
+        return
+    a.joined = result.ok
+    a.join_status = str(result)
+    if result.ok:
+        ui.event(worker, "JOIN", f"{a.username} → group {group_id}: {result}", C.GREEN)
+    else:
+        ui.event(worker, "JOIN-FAIL", f"{a.username} → group {group_id}: {result}", C.YELLOW)
 
 
 def run_one(
     worker: int,
-    solver: SolvexClient,
+    solver: TwoCaptchaClient | AntiCaptchaClient,
     proxy: str | None,
     birthday_cfg,
     gender_cfg,
@@ -184,6 +236,8 @@ def run_one(
     solve_pow: bool = False,
     browser_cfg: str = "auto",
     check_username: bool = False,
+    group_id: int | str | None = None,
+    auto_join: bool = False,
 ) -> Attempt:
     a = Attempt(worker=worker, proxy=proxy)
     a.username = gen_username()
@@ -238,9 +292,22 @@ def run_one(
                 a.cookies = "; ".join(f"{k}={v}" for k, v in jar.items())
                 a.created = True
                 ui.success(worker, "DIRECT", a.username, f"{a.username}:{a.password}", C.GREEN)
+                _maybe_join_group(a, client._session, profile,
+                                  group_id=group_id, auto_join=auto_join, ui=ui, worker=worker,
+                                  arkose_solver=solver, proxy=proxy)
                 return a
 
             _captcha_t0 = time.time()
+            # CRITICAL: the UA we hand the solver becomes the UA the worker uses
+            # to load /fc/gt2/... and is baked into the Arkose token. Roblox
+            # validates that token-UA against the /v2/signup request-UA — any
+            # drift produces "Challenge failed to authorize request" 403s even
+            # when the captcha itself was solved correctly. Always pass the
+            # worker's actual profile UA here, never a hardcoded one.
+            #
+            # (Historical note: Solvex enforced a macOS Safari UA at createTask
+            # which forced us to pin Safari here regardless of profile. 2Captcha
+            # has no such constraint — feed it the real per-worker UA.)
             arkose_resp = solver.arkose(
                 public_key=_ARKOSE_PK,
                 surl=_ARKOSE_SURL,
@@ -273,10 +340,20 @@ def run_one(
 
             token = arkose_resp["token"]
 
+            # /challenge/v1/continue MUST validate the token before the signup
+            # retry — if Roblox rejects it here the retry on /v2/signup will
+            # 403 with "Challenge failed to authorize request" and we'll have
+            # no idea why. Surface the failure instead of swallowing it.
             try:
-                auth.submit_arkose_token(token)
-            except Exception:
-                pass
+                cont_resp = auth.submit_arkose_token(token)
+            except Exception as e:
+                a.error = f"challenge/continue threw: {e}"[:200]
+                ui.event(worker, "FAIL", f"{a.username} — {a.error}", C.RED)
+                return a
+            if isinstance(cont_resp, dict) and cont_resp.get("errors"):
+                a.error = f"challenge/continue rejected token: {str(cont_resp)[:160]}"
+                ui.event(worker, "FAIL", f"{a.username} — {a.error}", C.RED)
+                return a
 
             meta_b64 = base64.b64encode(json.dumps({
                 "unifiedCaptchaId": challenge.unified_captcha_id,
@@ -340,6 +417,9 @@ def run_one(
                 f"{a.username}:{a.password}  (captcha={a.captcha_ms}ms · {a.browser})",
                 C.GREEN,
             )
+            _maybe_join_group(a, client._session, profile,
+                              group_id=group_id, auto_join=auto_join, ui=ui, worker=worker,
+                              arkose_solver=solver, proxy=proxy)
         elif not suppress_fail_log:
             a.error = f"signup_status={retry_resp.status_code}: {retry_resp.text[:120]}"
             ui.event(worker, "FAIL", f"{a.username} — {a.error}  (captcha={a.captcha_ms}ms)", C.YELLOW)
@@ -375,7 +455,12 @@ def _g(cfg: dict, *keys, default=None):
     return cur
 
 
-def _write_result(a: Attempt, accounts_path: str, cookies_path: str):
+def _write_result(
+    a: Attempt,
+    accounts_path: str,
+    cookies_path: str,
+    joined_path: str | None = None,
+):
     if not a.created:
         return
     line = f"{a.username}:{a.password}"
@@ -387,6 +472,12 @@ def _write_result(a: Attempt, accounts_path: str, cookies_path: str):
         if a.cookies:
             with open(cookies_path, "a", encoding="utf-8") as f:
                 f.write(f"{a.cookies}\n")
+        # joined.txt is the source of truth for "already joined the group"
+        # used by both this writer (post-signup auto-join) and the standalone
+        # join_group.py runner. One username per line; idempotent.
+        if joined_path and a.joined:
+            with open(joined_path, "a", encoding="utf-8") as f:
+                f.write(f"{a.username}\n")
 
 
 def main():
@@ -397,8 +488,13 @@ def main():
     ap.add_argument("--debug", action="store_true")
     ap.add_argument("--compact", action="store_true", help="single-line live status bar")
     ap.add_argument("--no-compact", action="store_true")
-    ap.add_argument("--solvex-url", metavar="URL")
-    ap.add_argument("--solvex-key", metavar="KEY", help="Solvex API key (sk_…)")
+    ap.add_argument("--solver", choices=["2captcha", "anticaptcha"], help="Override [run].solver from config")
+    ap.add_argument("--twocaptcha-url", metavar="URL")
+    ap.add_argument("--twocaptcha-key", metavar="KEY", help="2Captcha API key")
+    ap.add_argument("--anticaptcha-url", metavar="URL")
+    ap.add_argument("--anticaptcha-key", metavar="KEY", help="Anti-Captcha API key")
+    ap.add_argument("--group-id", metavar="ID", help="Auto-join this community group after each signup (overrides config)")
+    ap.add_argument("--no-join", action="store_true", help="Disable post-signup group join even if config enables it")
     ap.add_argument("--proxy-mode", choices=["pool", "fixed", "none"])
     ap.add_argument("--proxy-file", metavar="FILE")
     ap.add_argument("--proxy-url", metavar="URL")
@@ -423,12 +519,25 @@ def main():
     if args.no_compact:
         compact = False
 
-    timeout_s     = float(_g(cfg, "solvex", "timeout_s",        default=120))
-    poll_interval = float(_g(cfg, "solvex", "poll_interval_s",  default=0.5))
-    solve_pow     = bool(_g(cfg,  "solvex", "solve_pow",         default=False))
-    solvex_url    = args.solvex_url or _g(cfg, "solvex", "url",     default="https://api.solvex.run")
-    solvex_key    = args.solvex_key or _g(cfg, "solvex", "api_key", default=None)
-    disable_http3 = bool(_g(cfg, "solvex", "disable_http3",     default=False))
+    # Solver selection: "2captcha" or "anticaptcha". Per-provider knobs
+    # live under their own config sections so the inactive one stays
+    # available for fast A/B testing without touching code.
+    solver_name = (args.solver or str(_g(cfg, "run", "solver", default="anticaptcha"))).strip().lower()
+    if solver_name not in {"2captcha", "anticaptcha"}:
+        raise SystemExit(f"unknown solver '{solver_name}' (expected '2captcha' or 'anticaptcha')")
+
+    _section = "twocaptcha" if solver_name == "2captcha" else "anticaptcha"
+    _default_url = "https://api.2captcha.com" if solver_name == "2captcha" else "https://api.anti-captcha.com"
+    _default_poll = 5.0 if solver_name == "2captcha" else 3.0
+
+    timeout_s     = float(_g(cfg, _section, "timeout_s",        default=900))
+    poll_interval = float(_g(cfg, _section, "poll_interval_s",  default=_default_poll))
+    solve_pow     = bool(_g(cfg,  _section, "solve_pow",        default=False))
+
+    twocaptcha_url  = args.twocaptcha_url  or _g(cfg, "twocaptcha",  "url",     default="https://api.2captcha.com")
+    twocaptcha_key  = args.twocaptcha_key  or _g(cfg, "twocaptcha",  "api_key", default=None)
+    anticaptcha_url = args.anticaptcha_url or _g(cfg, "anticaptcha", "url",     default="https://api.anti-captcha.com")
+    anticaptcha_key = args.anticaptcha_key or _g(cfg, "anticaptcha", "api_key", default=None)
 
     proxy_mode = args.proxy_mode or _g(cfg, "proxy", "mode", default="pool")
     if args.no_proxy:
@@ -441,6 +550,15 @@ def main():
     output_dir    = _resolve(args.output_dir or _g(cfg, "output", "dir",           default="output"))
     accounts_name = _g(cfg, "output", "accounts_file", default="accounts.txt")
     cookies_name  = _g(cfg, "output", "cookies_file",  default="cookies.txt")
+    joined_name   = _g(cfg, "output", "joined_file",   default="joined.txt")
+
+    # Post-signup group join. Disabled if --no-join, or if neither config
+    # nor --group-id supplies an id. Empty/missing id → no-op (signups
+    # continue normally).
+    _cfg_group_id  = _g(cfg, "group", "id", default=None)
+    _cfg_group_on  = bool(_g(cfg, "group", "enabled", default=True))
+    group_id_run: int | str | None = args.group_id or _cfg_group_id
+    auto_join_run = bool(group_id_run) and _cfg_group_on and not args.no_join
 
     proxy_pool: list[str] = []
     if proxy_mode == "pool":
@@ -465,24 +583,33 @@ def main():
     os.makedirs(output_dir, exist_ok=True)
     accounts_path = os.path.join(output_dir, accounts_name)
     cookies_path  = os.path.join(output_dir, cookies_name)
+    joined_path   = os.path.join(output_dir, joined_name)
 
     total = count if count > 0 else None
     ui = UI(title="Roblox Account Creator", compact=compact, total=total)
 
     target        = str(count) if count > 0 else "∞"
-    bday_label    = "auto (random 16-40yo)" if _is_auto(birthday_cfg) else str(birthday_cfg)
+    bday_label    = "auto (random 19-40yo)" if _is_auto(birthday_cfg) else str(birthday_cfg)
     gender_label  = "auto (random F/M/N)"  if _is_auto(gender_cfg) else {1: "F", 2: "M", 3: "N/A"}.get(int(gender_cfg), str(gender_cfg))
     browser_label = "auto (safari/chrome rotation)" if browser_cfg.strip().lower() not in _BROWSER_PROFILES else browser_cfg.strip().lower()
 
     try:
-        client = SolvexClient(
-            api_key=solvex_key,
-            base_url=solvex_url,
-            poll_interval=poll_interval,
-            timeout_s=timeout_s,
-            use_http3=not disable_http3,
-        )
-        solver_label = f"solvex ({client.base})"
+        if solver_name == "2captcha":
+            client = TwoCaptchaClient(
+                api_key=twocaptcha_key,
+                base_url=twocaptcha_url,
+                poll_interval=poll_interval,
+                timeout_s=timeout_s,
+            )
+            solver_label = f"2captcha ({client.base})"
+        else:
+            client = AntiCaptchaClient(
+                api_key=anticaptcha_key,
+                base_url=anticaptcha_url,
+                poll_interval=poll_interval,
+                timeout_s=timeout_s,
+            )
+            solver_label = f"anticaptcha ({client.base})"
     except SolverError as e:
         print(c(C.RED, f"  ! solver init failed: {e}"))
         sys.exit(1)
@@ -498,6 +625,7 @@ def main():
             ("check_user",   "ON" if check_user    else "off"),
             ("retry_fail",   "ON" if retry_on_fail else "off"),
             ("solve_pow",    "ON" if solve_pow     else "off"),
+            ("auto_join",    f"group {group_id_run}" if auto_join_run else "off"),
             ("output",       accounts_path),
             ("debug",        "ON" if debug         else "off"),
         ],
@@ -520,7 +648,7 @@ def main():
 
     def _finalize(a: Attempt):
         results.append(a)
-        _write_result(a, accounts_path, cookies_path)
+        _write_result(a, accounts_path, cookies_path, joined_path)
         ui.tick(a.created, suppressed=a.suppressed, label=a.username)
 
     with ThreadPoolExecutor(max_workers=threads) as ex:
@@ -544,6 +672,7 @@ def main():
                 run_one, i % threads, client, proxy_for(),
                 birthday_cfg, gender_cfg, debug, ui,
                 retry_on_fail, solve_pow, browser_cfg, check_user,
+                group_id_run, auto_join_run,
             )
             in_flight.add(fut)
 

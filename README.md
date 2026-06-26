@@ -138,7 +138,7 @@ threads = 32              # concurrent workers
 count = 0                 # 0 = infinite (Ctrl-C to stop)
 debug = false             # full tracebacks on errors
 compact = false           # single-line live status bar
-birthday = "auto"         # "auto" = random 16–40yo, or ISO string e.g. "1995-06-15T00:00:00.000Z"
+birthday = "auto"         # "auto" = random 19–40yo, or ISO string e.g. "1995-06-15T00:00:00.000Z"
 gender = "auto"           # "auto" = random F/M/N, or 1=F, 2=M, 3=N/A
 browser = "auto"          # "auto" = random Safari/Chrome per worker, or pin "safari" / "chrome"
 check_username = false    # pre-flight via /v1/usernames/validate; skips /v2/signup on names Roblox would reject

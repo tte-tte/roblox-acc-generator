@@ -267,7 +267,18 @@ class RobloxAuth:
             data=body,
             headers=self._auth_headers(),
         )
-        return resp.json()
+        try:
+            js = resp.json()
+        except Exception:
+            js = {}
+        if resp.status_code >= 400:
+            # Surface HTTP status in the returned dict so callers can detect
+            # rejection even when Roblox returns a non-JSON body.
+            js.setdefault("errors", [{
+                "code": resp.status_code,
+                "message": (resp.text or "")[:200] or f"HTTP {resp.status_code}",
+            }])
+        return js
 
 
 class RobloxError(Exception):
